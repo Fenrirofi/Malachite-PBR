@@ -137,6 +137,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "glam",
  "malx",
  "pollster",
  "winit",

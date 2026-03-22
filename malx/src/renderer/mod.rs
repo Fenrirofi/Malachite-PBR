@@ -1,2 +1,4 @@
-pub mod context;
+mod context;
+mod pipeline;
+
 pub use context::RenderContext;
