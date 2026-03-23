@@ -24,6 +24,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
+mod loader;
+
 // ── Camera tumble ─────────────────────────────────────────────────────────────
 
 /// Tracks the orbit / tumble state of the camera around the scene origin.
@@ -352,8 +354,13 @@ impl ApplicationHandler for App {
         let ctx = pollster::block_on(RenderContext::new(window));
 
         let mut scene = Scene::new(Camera::default());
-        let mesh = sphere(1.0, 32, 16).upload(ctx.device());
-        scene.add(SceneObject::new(mesh, Mat4::IDENTITY));
+        
+        let obj_path = std::path::Path::new("model/Koltuk.obj");
+        let meshes = loader::load(obj_path).expect("nie można załadować OBJ");
+        for mesh in meshes {
+            let gpu = mesh.upload(ctx.device());
+            scene.add(SceneObject::new(gpu, Mat4::IDENTITY));
+        }
 
         self.ctx    = Some(ctx);
         self.scene  = Some(scene);
