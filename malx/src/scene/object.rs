@@ -1,10 +1,18 @@
+//! A single renderable object placed in the scene.
+
 use glam::Mat4;
 use crate::geometry::GpuMesh;
 
-/// A single renderable object in the scene.
+/// A renderable scene object: a GPU mesh plus a model-to-world transform.
+///
+/// Multiple objects may share the same mesh data if needed in the future.
 pub struct SceneObject {
-    pub mesh:      GpuMesh,
-    /// Model-to-world transform.
+    /// GPU-resident vertex and index data.
+    pub mesh: GpuMesh,
+    /// Model-to-world transformation matrix.
+    ///
+    /// Applied in the vertex shader alongside the camera view-projection.
+    /// Use [`Mat4::IDENTITY`] to place the mesh directly at the world origin.
     pub transform: Mat4,
 }
 

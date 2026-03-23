@@ -1,7 +1,18 @@
+//! The main scene render pipeline: Blinn-Phong shading with depth testing.
+//!
+//! Bind group layout:
+//! - Group 0, binding 0 — `CameraUniform` (vertex + fragment stages)
+//! - Group 1, binding 0 — `ModelUniform`  (vertex stage only)
+//!
+//! The pipeline uses a 32-bit depth buffer, counter-clockwise winding, and
+//! back-face culling.
+
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use crate::geometry::Vertex;
 use crate::scene::camera::CameraUniform;
+
+// ── WGSL shader source ────────────────────────────────────────────────────────
 
 const SHADER: &str = r#"
 // ── Uniforms ──────────────────────────────────────────────────────────────────
@@ -14,6 +25,7 @@ struct CameraUniform {
 
 struct ModelUniform {
     model      : mat4x4<f32>,
+    /// Inverse-transpose of the model matrix, used to transform normals.
     normal_mat : mat4x4<f32>,
 }
 
@@ -36,6 +48,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     let world_pos  = model.model * vec4<f32>(in.position, 1.0);
+    // Transform normal with the inverse-transpose to handle non-uniform scaling.
     let world_norm = normalize((model.normal_mat * vec4<f32>(in.normal, 0.0)).xyz);
 
     var out: VertexOutput;
@@ -45,7 +58,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// ── Fragment — Blinn-Phong ────────────────────────────────────────────────────
+// ── Fragment — Blinn-Phong shading ────────────────────────────────────────────
 
 const LIGHT_DIR   : vec3<f32> = vec3<f32>(1.0, 2.0, 3.0);
 const LIGHT_COLOR : vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
@@ -53,10 +66,10 @@ const OBJECT_COLOR: vec3<f32> = vec3<f32>(0.4, 0.7, 1.0);
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let norm     = normalize(in.world_norm);
-    let light_d  = normalize(LIGHT_DIR);
-    let view_d   = normalize(camera.eye - in.world_pos);
-    let half_d   = normalize(light_d + view_d);
+    let norm    = normalize(in.world_norm);
+    let light_d = normalize(LIGHT_DIR);
+    let view_d  = normalize(camera.eye - in.world_pos);
+    let half_d  = normalize(light_d + view_d); // Blinn halfway vector
 
     let ambient  = 0.15 * OBJECT_COLOR;
     let diffuse  = max(dot(norm, light_d), 0.0) * OBJECT_COLOR * LIGHT_COLOR;
@@ -66,29 +79,37 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-// ── Model push-constant uniform (per object) ─────────────────────────────────
+// ── Per-object model uniform ──────────────────────────────────────────────────
 
+/// Per-object GPU uniform: model matrix + its inverse-transpose for normals.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ModelUniform {
-    pub model:      [[f32; 4]; 4],
+    /// Object-to-world (model) matrix.
+    pub model: [[f32; 4]; 4],
+    /// Inverse-transpose of `model`, used to correctly transform normals when
+    /// the model matrix contains non-uniform scaling.
     pub normal_mat: [[f32; 4]; 4],
 }
 
-// ── RenderPipeline + bind groups ─────────────────────────────────────────────
+// ── ScenePipeline ─────────────────────────────────────────────────────────────
 
+/// Owns the wgpu render pipeline, bind groups, camera buffer, and depth texture
+/// for the main scene rendering pass.
 pub struct ScenePipeline {
-    pub pipeline:            wgpu::RenderPipeline,
+    pub pipeline:                 wgpu::RenderPipeline,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub model_bind_group_layout:  wgpu::BindGroupLayout,
-    pub camera_buffer:       wgpu::Buffer,
-    pub camera_bind_group:   wgpu::BindGroup,
-    pub depth_texture:       wgpu::Texture,
-    pub depth_view:          wgpu::TextureView,
-    pub depth_format:        wgpu::TextureFormat,
+    pub camera_buffer:            wgpu::Buffer,
+    pub camera_bind_group:        wgpu::BindGroup,
+    pub depth_texture:            wgpu::Texture,
+    pub depth_view:               wgpu::TextureView,
+    pub depth_format:             wgpu::TextureFormat,
 }
 
 impl ScenePipeline {
+    /// Creates all GPU resources: shader, bind groups, buffers, depth texture,
+    /// and the render pipeline itself.
     pub fn new(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
@@ -101,6 +122,7 @@ impl ScenePipeline {
         });
 
         // ── Bind group layouts ────────────────────────────────────────────────
+        // Group 0: camera (visible to both vertex and fragment stages).
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("camera_bgl"),
@@ -116,6 +138,7 @@ impl ScenePipeline {
                 }],
             });
 
+        // Group 1: per-object model transform (vertex stage only).
         let model_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("model_bgl"),
@@ -131,7 +154,7 @@ impl ScenePipeline {
                 }],
             });
 
-        // ── Camera buffer ─────────────────────────────────────────────────────
+        // ── Camera uniform buffer ─────────────────────────────────────────────
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label:              Some("camera_buffer"),
             size:               std::mem::size_of::<CameraUniform>() as u64,
@@ -153,11 +176,14 @@ impl ScenePipeline {
         let (depth_texture, depth_view) =
             Self::create_depth_texture(device, width, height, depth_format);
 
-        // ── Pipeline ──────────────────────────────────────────────────────────
+        // ── Render pipeline ───────────────────────────────────────────────────
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:               Some("scene_pipeline_layout"),
-            bind_group_layouts:  &[Some(&camera_bind_group_layout), Some(&model_bind_group_layout)],
-            immediate_size:      0,
+            label:              Some("scene_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(&camera_bind_group_layout),
+                Some(&model_bind_group_layout),
+            ],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -174,6 +200,7 @@ impl ScenePipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format:     surface_format,
+                    // Opaque: new colour replaces old (no alpha blend needed).
                     blend:      Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -182,7 +209,7 @@ impl ScenePipeline {
             primitive: wgpu::PrimitiveState {
                 topology:           wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face:         wgpu::FrontFace::Ccw,
+                front_face:         wgpu::FrontFace::Ccw, // counter-clockwise = front
                 cull_mode:          Some(wgpu::Face::Back),
                 ..Default::default()
             },
@@ -210,12 +237,15 @@ impl ScenePipeline {
         }
     }
 
+    /// Recreates the depth texture after a window resize.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (tex, view) = Self::create_depth_texture(device, width, height, self.depth_format);
+        let (tex, view) =
+            Self::create_depth_texture(device, width, height, self.depth_format);
         self.depth_texture = tex;
         self.depth_view    = view;
     }
 
+    /// Creates a depth texture and its default view at the given size.
     fn create_depth_texture(
         device: &wgpu::Device,
         width: u32,
@@ -236,7 +266,12 @@ impl ScenePipeline {
         (texture, view)
     }
 
-    /// Creates a per-object bind group + uniform buffer for the given model matrix.
+    /// Creates a per-frame, per-object uniform buffer + bind group for the
+    /// given model transform.
+    ///
+    /// The buffer is allocated fresh each call; this is acceptable for a small
+    /// number of objects.  For many objects, a single large buffer with dynamic
+    /// offsets would be more efficient.
     pub fn create_model_bind_group(
         &self,
         device: &wgpu::Device,
