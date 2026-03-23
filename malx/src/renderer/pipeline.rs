@@ -14,70 +14,7 @@ use crate::scene::camera::CameraUniform;
 
 // ── WGSL shader source ────────────────────────────────────────────────────────
 
-const SHADER: &str = r#"
-// ── Uniforms ──────────────────────────────────────────────────────────────────
-
-struct CameraUniform {
-    view_proj : mat4x4<f32>,
-    eye       : vec3<f32>,
-    _pad      : f32,
-}
-
-struct ModelUniform {
-    model      : mat4x4<f32>,
-    /// Inverse-transpose of the model matrix, used to transform normals.
-    normal_mat : mat4x4<f32>,
-}
-
-@group(0) @binding(0) var<uniform> camera : CameraUniform;
-@group(1) @binding(0) var<uniform> model  : ModelUniform;
-
-// ── Vertex ────────────────────────────────────────────────────────────────────
-
-struct VertexInput {
-    @location(0) position : vec3<f32>,
-    @location(1) normal   : vec3<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) clip_pos   : vec4<f32>,
-    @location(0)       world_pos  : vec3<f32>,
-    @location(1)       world_norm : vec3<f32>,
-}
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    let world_pos  = model.model * vec4<f32>(in.position, 1.0);
-    // Transform normal with the inverse-transpose to handle non-uniform scaling.
-    let world_norm = normalize((model.normal_mat * vec4<f32>(in.normal, 0.0)).xyz);
-
-    var out: VertexOutput;
-    out.clip_pos   = camera.view_proj * world_pos;
-    out.world_pos  = world_pos.xyz;
-    out.world_norm = world_norm;
-    return out;
-}
-
-// ── Fragment — Blinn-Phong shading ────────────────────────────────────────────
-
-const LIGHT_DIR   : vec3<f32> = vec3<f32>(1.0, 2.0, 3.0);
-const LIGHT_COLOR : vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
-const OBJECT_COLOR: vec3<f32> = vec3<f32>(0.4, 0.7, 1.0);
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let norm    = normalize(in.world_norm);
-    let light_d = normalize(LIGHT_DIR);
-    let view_d  = normalize(camera.eye - in.world_pos);
-    let half_d  = normalize(light_d + view_d); // Blinn halfway vector
-
-    let ambient  = 0.15 * OBJECT_COLOR;
-    let diffuse  = max(dot(norm, light_d), 0.0) * OBJECT_COLOR * LIGHT_COLOR;
-    let specular = pow(max(dot(norm, half_d), 0.0), 64.0) * LIGHT_COLOR * 0.5;
-
-    return vec4<f32>(ambient + diffuse + specular, 1.0);
-}
-"#;
+const SHADER: &str = include_str!("../../shaders/pbr_shader.wgsl");
 
 // ── Per-object model uniform ──────────────────────────────────────────────────
 
@@ -117,7 +54,7 @@ impl ScenePipeline {
         height: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("scene_shader"),
+            label:  Some("pbr_shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
 

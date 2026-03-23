@@ -8,6 +8,7 @@
 ///
 /// Controls:
 /// - Alt + Left-drag      → tumble / orbit camera
+/// - Alt + Scroll         → zoom (change camera distance)
 /// - F + Scroll           → change brush inner radius (size)
 /// - Shift + F + Scroll   → change brush hardness gap (outer – inner)
 /// - Left-click on model  → print hit point and normal to stdout
@@ -40,6 +41,9 @@ struct Tumble {
     yaw: f32,
     /// Vertical rotation (elevation), in degrees. Clamped to +-89 deg.
     pitch: f32,
+    /// Distance from the camera eye to the orbit target, in world units.
+    /// Adjusted by Alt + Scroll; clamped to [0.5, 20.0].
+    camera_dist: f32,
 }
 
 impl Tumble {
@@ -50,18 +54,26 @@ impl Tumble {
             last_y: 0.0,
             yaw: 0.0,
             pitch: 20.0,
+            camera_dist: 3.0,
         }
     }
 
     /// Returns the world-space eye position for a camera orbiting `target` at
     /// the given distance, using the current yaw/pitch angles.
-    fn eye(&self, target: Vec3, dist: f32) -> Vec3 {
+    fn eye(&self, target: Vec3) -> Vec3 {
         let (y, p) = (self.yaw.to_radians(), self.pitch.to_radians());
+        let d = self.camera_dist;
         target + Vec3::new(
-            dist * p.cos() * y.sin(),
-            dist * p.sin(),
-            dist * p.cos() * y.cos(),
+            d * p.cos() * y.sin(),
+            d * p.sin(),
+            d * p.cos() * y.cos(),
         )
+    }
+
+    /// Zooms by changing the camera distance.
+    /// `delta` is in scroll lines; positive = scroll up = zoom in (closer).
+    fn zoom(&mut self, delta: f32) {
+        self.camera_dist = (self.camera_dist - delta * 0.3).clamp(0.5, 20.0);
     }
 
     /// Returns a normalised "up" vector consistent with the current orientation.
@@ -250,7 +262,7 @@ impl App {
     /// Call this whenever yaw / pitch changes, or after initial setup.
     fn update_camera(&mut self) {
         if let Some(s) = &mut self.scene {
-            s.camera.eye    = self.tumble.eye(Vec3::ZERO, 3.0);
+            s.camera.eye    = self.tumble.eye(Vec3::ZERO);
             s.camera.target = Vec3::ZERO;
             s.camera.up     = self.tumble.up();
         }
@@ -383,19 +395,28 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── Scroll wheel (only when F is held) ────────────────────────────
-            WindowEvent::MouseWheel { delta, .. } if self.f_held => {
+            // ── Scroll wheel ──────────────────────────────────────────────────
+            // Priority: Alt+Scroll = zoom, F+Scroll = brush resize.
+            // Both normalise the delta the same way so they feel consistent.
+            WindowEvent::MouseWheel { delta, .. } => {
                 // Normalise line-based and pixel-based deltas to a signed
-                // line count so the brush feels the same on all devices.
+                // line count so behaviour is consistent across input devices.
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y)  => y,
                     MouseScrollDelta::PixelDelta(pos)  => (pos.y / 20.0) as f32,
                 };
 
-                if self.shift_held {
-                    self.brush.scroll_hardness(lines); // outer ring gap
-                } else {
-                    self.brush.scroll_size(lines);     // inner ring size
+                if self.alt_held {
+                    // Alt + Scroll → zoom camera in/out.
+                    self.tumble.zoom(lines);
+                    self.update_camera();
+                } else if self.f_held {
+                    // F + Scroll → brush size; Shift+F + Scroll → hardness gap.
+                    if self.shift_held {
+                        self.brush.scroll_hardness(lines);
+                    } else {
+                        self.brush.scroll_size(lines);
+                    }
                 }
                 self.request_redraw();
             }
