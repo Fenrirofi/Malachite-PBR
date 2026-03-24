@@ -47,11 +47,14 @@ pub struct ScenePipeline {
 impl ScenePipeline {
     /// Creates all GPU resources: shader, bind groups, buffers, depth texture,
     /// and the render pipeline itself.
+    ///
+    /// `hdr_format` must be `Rgba16Float` — the scene writes raw HDR radiance
+    /// into an offscreen texture; ACES tonemapping happens in a separate pass.
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
+        device:     &wgpu::Device,
+        hdr_format: wgpu::TextureFormat, // Rgba16Float
+        width:      u32,
+        height:     u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("pbr_shader"),
@@ -136,7 +139,7 @@ impl ScenePipeline {
                 module:      &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format:     surface_format,
+                    format:     hdr_format,  // Rgba16Float — HDR offscreen target
                     // Opaque: new colour replaces old (no alpha blend needed).
                     blend:      Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,

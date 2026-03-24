@@ -61,8 +61,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 //   G — Smith height-correlated masking-shadowing term
 //   F — Schlick Fresnel approximation
 //
-// Everything is computed in linear colour space. Output is Reinhard tone-mapped
-// and gamma-corrected (^1/2.2) before writing to the sRGB surface.
+// Everything is computed in linear colour space.  Output is raw HDR radiance
+// written into an Rgba16Float offscreen texture.  ACES tonemapping and gamma
+// correction are applied in a separate fullscreen pass (tonemapping.rs).
 
 const PI : f32 = 3.14159265358979;
 
@@ -150,6 +151,9 @@ fn cook_torrance(
 }
 
 // ── Fragment shader ───────────────────────────────────────────────────────────
+//
+// Outputs raw HDR radiance into an Rgba16Float render target.
+// Tone-mapping and gamma correction are applied in a separate fullscreen pass.
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -174,13 +178,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Ambient term: a simple IBL stand-in until a real environment map is added.
     let ambient = vec3<f32>(0.03) * BASE_COLOR * AO;
 
-    var color = ambient + Lo;
-
-    // Reinhard tone-mapping: HDR radiance → [0, 1].
-    color = color / (color + vec3<f32>(1.0));
-
-    // Gamma correction: linear → sRGB (γ = 2.2 approximation).
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    // Raw HDR radiance — no tonemapping, no gamma.
+    // A separate fullscreen ACES pass reads this Rgba16Float texture.
+    let color = ambient + Lo;
 
     return vec4<f32>(color, 1.0);
 }

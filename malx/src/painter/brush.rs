@@ -3,20 +3,21 @@
 //! # Visual design
 //!
 //! Each ring is a thin triangle-strip ribbon in world space, rendered inside
-//! the 3-D scene pass so perspective foreshortening and depth testing work
+//! the 3‑D scene pass so perspective foreshortening and depth testing work
 //! correctly.  The rings live in the tangent plane at the ray-hit point:
 //!
 //! - **Inner ring** — brush size (solid white)
 //! - **Outer ring** — hardness boundary (dashed yellow, 24 dashes)
 //! - **Centre dot** — small filled disk at the exact hit point
 //!
-//! When the cursor misses the model the 3-D rings are simply not drawn.
+//! When the cursor misses the model the 3‑D rings are simply not drawn.
 //!
-//! # Screen-space fallback (2-D overlay)
+//! # Screen-space fallback (2‑D overlay)
 //!
 //! A separate screen-space pass is drawn when the cursor is off the model.
-//! It renders the same two rings as pixel-radius circles so the user always
-//! has some visual feedback.
+//! It renders the same two rings as pixel‑radius circles so the user always
+//! has some visual feedback.  The radii in pixels are **constant** (no attempt
+//! to match world size), because there is no surface to project onto.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
@@ -38,7 +39,7 @@ struct RingVertex {
     /// Arc parameter `[0, 1)` around the ring circumference.
     /// Used by the fragment shader to create dashes on the outer ring.
     arc_t: f32,
-    /// Explicit padding to maintain 32-byte alignment (3 × f32).
+    /// Explicit padding to maintain 32‑byte alignment (3 × f32).
     _pad: [f32; 3],
 }
 
@@ -59,16 +60,16 @@ impl RingVertex {
 
 // ── GPU uniforms ──────────────────────────────────────────────────────────────
 
-/// Camera uniform for the 3-D brush ring shader (view-projection only).
+/// Camera uniform for the 3‑D brush ring shader (view‑projection only).
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct BrushCameraUniform {
     pub view_proj: [[f32; 4]; 4],
 }
 
-/// All per-frame brush data passed from the application to the renderer.
+/// All per‑frame brush data passed from the application to the renderer.
 pub struct BrushUniform {
-    /// World-space surface hit point; `None` when cursor misses the model.
+    /// World‑space surface hit point; `None` when cursor misses the model.
     pub hit: Option<Vec3>,
     /// Surface normal at the hit point; used to build the tangent frame.
     pub normal: Option<Vec3>,
@@ -76,15 +77,17 @@ pub struct BrushUniform {
     pub inner_r: f32,
     /// Outer ring radius in world units (>= inner_r).
     pub outer_r: f32,
-    /// Cursor position in physical pixels (for the 2-D fallback).
+    /// Cursor position in physical pixels (for the 2‑D fallback).
     pub cursor_px: [f32; 2],
     /// Viewport size in physical pixels.
     pub viewport: [f32; 2],
-    /// The same view-projection matrix used for the scene.
+    /// World‑space camera eye position (for screen‑space ring sizing).
+    pub eye: Vec3,
+    /// The same view‑projection matrix used for the scene.
     pub view_proj: Mat4,
 }
 
-// ── WGSL: 3-D ring shader ─────────────────────────────────────────────────────
+// ── WGSL: 3‑D ring shader ─────────────────────────────────────────────────────
 
 const BRUSH_SHADER_3D: &str = r#"
 struct Camera {
@@ -122,7 +125,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0);
     }
 
-    // kind > 1.5 → outer ring → dashed orange-yellow (24 dashes around the ring)
+    // kind > 1.5 → outer ring → dashed orange‑yellow (24 dashes around the ring)
     let frac = fract(in.arc_t * 24.0);
     if frac > 0.55 {
         discard; // gap between dashes
@@ -131,18 +134,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-// ── WGSL: 2-D fallback shader ─────────────────────────────────────────────────
-//
-// Renders a full-screen triangle and uses per-fragment distance from the cursor
-// centre to draw two anti-aliased circles.
+// ── WGSL: 2‑D fallback shader ─────────────────────────────────────────────────
 
 const BRUSH_SHADER_2D: &str = r#"
 struct Brush2D {
-    cx_px    : f32,  // cursor X in physical pixels
-    cy_px    : f32,  // cursor Y in physical pixels
-    inner_px : f32,  // inner ring radius in pixels
-    outer_px : f32,  // outer ring radius in pixels
-    line_w   : f32,  // half-width of each ring stroke in pixels
+    cx_px    : f32,
+    cy_px    : f32,
+    inner_px : f32,
+    outer_px : f32,
+    line_w   : f32,
     _pad0    : f32,
     _pad1    : f32,
     _pad2    : f32,
@@ -151,7 +151,6 @@ struct Brush2D {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-    // Full-screen triangle trick: three vertices cover the entire clip space.
     var pos = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -3.0),
         vec2<f32>(-1.0,  1.0),
@@ -167,15 +166,12 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let dist = sqrt(dx * dx + dy * dy);
     let rh   = brush.line_w;
 
-    // Centre dot
     if dist < rh { return vec4<f32>(1.0, 1.0, 1.0, 1.0); }
 
-    // Inner ring (anti-aliased)
     if abs(dist - brush.inner_px) < rh {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0 - abs(dist - brush.inner_px) / rh);
     }
 
-    // Outer ring (dashed, anti-aliased) — only shown when gap is large enough
     if brush.outer_px > brush.inner_px + 1.0 {
         if abs(dist - brush.outer_px) < rh {
             let t = fract(atan2(dy, dx) / (2.0 * 3.14159265) * 24.0);
@@ -187,21 +183,12 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // transparent everywhere else
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 "#;
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
-/// Appends a flat ring (annular ribbon) to `vertices` and `indices`.
-///
-/// The ring lies in the plane spanned by `tangent_u` and `tangent_v`,
-/// centred at `centre`.  The ribbon has centre-line radius `radius` and
-/// half-width `half_w` in the radial direction.
-///
-/// `kind` is forwarded to the fragment shader to select colour:
-/// - `0.0` → white (inner ring)
-/// - `2.0` → dashed yellow (outer ring)
 fn ring_vertices(
     centre:     Vec3,
     tangent_u:  Vec3,
@@ -217,23 +204,19 @@ fn ring_vertices(
 
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
-        let a = t * std::f32::consts::TAU; // angle in radians
+        let a = t * std::f32::consts::TAU;
         let c = a.cos();
         let s = a.sin();
 
-        // Centre of the ribbon at this angle
         let pt     = centre + (tangent_u * c + tangent_v * s) * radius;
-        // Outward radial direction at this angle
         let radial = (tangent_u * c + tangent_v * s).normalize();
 
-        // Two vertices: inner and outer edge of the ribbon
         let p_inner = pt - radial * half_w;
         let p_outer = pt + radial * half_w;
 
         vertices.push(RingVertex { position: p_inner.to_array(), kind, arc_t: t, _pad: [0.0; 3] });
         vertices.push(RingVertex { position: p_outer.to_array(), kind, arc_t: t, _pad: [0.0; 3] });
 
-        // Build two triangles per quad (except the last segment which wraps).
         if i < segments {
             let b = base + (i * 2) as u32;
             indices.extend_from_slice(&[b, b+1, b+2, b+1, b+3, b+2]);
@@ -241,9 +224,6 @@ fn ring_vertices(
     }
 }
 
-/// Appends a filled disk (triangle fan) to `vertices` and `indices`.
-///
-/// The disk lies in the tangent plane at `centre` with the given `radius`.
 fn disk_vertices(
     centre:    Vec3,
     tangent_u: Vec3,
@@ -256,7 +236,6 @@ fn disk_vertices(
 ) {
     let base = vertices.len() as u32;
 
-    // Centre vertex of the fan.
     vertices.push(RingVertex {
         position: centre.to_array(),
         kind,
@@ -264,7 +243,6 @@ fn disk_vertices(
         _pad: [0.0; 3],
     });
 
-    // Rim vertices.
     for i in 0..=segments {
         let t  = i as f32 / segments as f32;
         let a  = t * std::f32::consts::TAU;
@@ -273,7 +251,6 @@ fn disk_vertices(
         vertices.push(RingVertex { position: pt.to_array(), kind, arc_t: t, _pad: [0.0; 3] });
 
         if i < segments {
-            // Fan triangle: centre → current rim → next rim.
             let rim_curr = base + 1 + i as u32;
             let rim_next = base + 1 + (i + 1) as u32;
             indices.extend_from_slice(&[base, rim_curr, rim_next]);
@@ -283,22 +260,17 @@ fn disk_vertices(
 
 // ── BrushPipeline ─────────────────────────────────────────────────────────────
 
-/// Owns both the 3-D ring pipeline and the 2-D fallback pipeline, along with
-/// their associated uniform buffers and bind groups.
 pub struct BrushPipeline {
-    // 3-D ring pipeline — drawn inside the scene pass (WITH depth test).
     pipeline_3d: wgpu::RenderPipeline,
     cam_buf:     wgpu::Buffer,
     cam_bg:      wgpu::BindGroup,
     cam_bgl:     wgpu::BindGroupLayout,
 
-    // 2-D fallback pipeline — drawn in the overlay pass (NO depth test).
     pipeline_2d: wgpu::RenderPipeline,
     uni2d_buf:   wgpu::Buffer,
     bg_2d:       wgpu::BindGroup,
 }
 
-/// CPU-side mirror of the `Brush2D` WGSL struct.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Default)]
 struct Uni2D {
@@ -313,19 +285,17 @@ struct Uni2D {
 }
 
 impl BrushPipeline {
-    /// Creates the 3-D ring pipeline and the 2-D fallback pipeline.
     pub fn new(
         device:         &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         depth_format:   wgpu::TextureFormat,
     ) -> Self {
-        // ── 3-D ring pipeline ─────────────────────────────────────────────────
+        // ── 3‑D ring pipeline ─────────────────────────────────────────────────
         let shader_3d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("brush_3d_shader"),
             source: wgpu::ShaderSource::Wgsl(BRUSH_SHADER_3D.into()),
         });
 
-        // Camera bind group (view-projection only, vertex stage).
         let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("brush_cam_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -383,34 +353,30 @@ impl BrushPipeline {
             }),
             primitive: wgpu::PrimitiveState {
                 topology:  wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None, // rings are thin — no culling
+                cull_mode: None,
                 ..Default::default()
             },
-            // Rings are drawn in the scene pass and must pass the depth test so
-            // they sit correctly on the model surface.
+            // FIX: depth_write disabled, LessEqual compare, no bias.
+            // Geometry is physically offset along the normal in draw_3d()
+            // so we don't need slope-scale bias here.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format:              depth_format,
-                depth_write_enabled: Some(false), // read depth, don't write it
+                depth_write_enabled: Some(false),
                 depth_compare:       Some(wgpu::CompareFunction::LessEqual),
                 stencil:             wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant:    -1,   // slight negative bias so the ring sits above
-                    slope_scale: -1.0, // the surface without z-fighting
-                    clamp:       0.0,
-                },
+                bias:                wgpu::DepthBiasState::default(),
             }),
             multisample:    wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache:          None,
         });
 
-        // ── 2-D fallback pipeline ─────────────────────────────────────────────
+        // ── 2‑D fallback pipeline ─────────────────────────────────────────────
         let shader_2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("brush_2d_shader"),
             source: wgpu::ShaderSource::Wgsl(BRUSH_SHADER_2D.into()),
         });
 
-        // Brush2D uniform (fragment stage only — vertex shader has no uniforms).
         let bgl2d = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("brush_2d_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -453,7 +419,7 @@ impl BrushPipeline {
             vertex: wgpu::VertexState {
                 module:      &shader_2d,
                 entry_point: Some("vs_main"),
-                buffers:     &[], // full-screen triangle — no vertex buffer
+                buffers:     &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -470,7 +436,7 @@ impl BrushPipeline {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None, // overlay pass — no depth testing
+            depth_stencil: None,
             multisample:    wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache:          None,
@@ -482,10 +448,6 @@ impl BrushPipeline {
         }
     }
 
-    /// Draws the 3-D brush rings.
-    ///
-    /// Must be called **inside** the scene render pass (which has a depth
-    /// attachment).  Does nothing if the cursor is not on the model surface.
     pub fn draw_3d<'rpass>(
         &'rpass self,
         pass:   &mut wgpu::RenderPass<'rpass>,
@@ -493,39 +455,53 @@ impl BrushPipeline {
         queue:  &wgpu::Queue,
         uni:    &BrushUniform,
     ) {
-        // Both hit and normal are required; bail if the cursor is off the model.
         let (hit, normal) = match (uni.hit, uni.normal) {
             (Some(h), Some(n)) => (h, n),
             _ => return,
         };
 
-        // Build an orthonormal tangent frame in the surface plane using
-        // Gram-Schmidt orthogonalisation against a chosen "up" guess.
-        let up   = if normal.y.abs() < 0.99 { Vec3::Y } else { Vec3::X };
-        let tang = (up - normal * normal.dot(up)).normalize();
+        // ── FIX 1: robust tangent frame ───────────────────────────────────────
+        // Pick the world axis least parallel to the normal to avoid degeneracy.
+        let ref_axis = if normal.z.abs() < 0.9 {
+            Vec3::Z
+        } else if normal.x.abs() < 0.9 {
+            Vec3::X
+        } else {
+            Vec3::Y
+        };
+        let tang = (ref_axis - normal * normal.dot(ref_axis)).normalize();
         let bita = normal.cross(tang).normalize();
 
-        // Ribbon half-width in world units (kept constant regardless of radius).
-        let half_w: f32  = 0.007;
-        let segs:   usize = 64;
+        // ── FIX 2: screen-space stroke width ─────────────────────────────────
+        let target_px_width = 1.8;
+        let px_per_unit = screen_pixels_per_world_unit(hit, uni.view_proj, uni.viewport);
+        let half_w = if px_per_unit > 0.0 {
+            (target_px_width / px_per_unit).clamp(0.001, uni.inner_r * 0.25)
+        } else {
+            0.001
+        };
+
+        // ── FIX 3: normal offset to avoid z-fighting ─────────────────────────
+        // Push geometry away from the surface proportionally to camera distance.
+        // This is more reliable than depth bias for coplanar geometry.
+        let cam_dist = (uni.eye - hit).length();
+        let normal_offset = (cam_dist * 0.0005).max(0.001);
+        let hit_offset = hit + normal * normal_offset;
+
+        let segs: usize = 64;
 
         let mut verts:   Vec<RingVertex> = Vec::new();
         let mut indices: Vec<u32>        = Vec::new();
 
-        // Centre dot (filled disk at the exact surface contact point).
-        disk_vertices(hit, tang, bita, 0.008, 0.0, 16, &mut verts, &mut indices);
+        disk_vertices(hit_offset, tang, bita, 0.008, 0.0, 16, &mut verts, &mut indices);
+        ring_vertices(hit_offset, tang, bita, uni.inner_r, half_w, 0.0, segs, &mut verts, &mut indices);
 
-        // Inner ring (brush size) — solid white.
-        ring_vertices(hit, tang, bita, uni.inner_r, half_w, 0.0, segs, &mut verts, &mut indices);
-
-        // Outer ring (hardness) — dashed yellow, only when visibly different.
         if uni.outer_r > uni.inner_r + 0.001 {
-            ring_vertices(hit, tang, bita, uni.outer_r, half_w, 2.0, segs, &mut verts, &mut indices);
+            ring_vertices(hit_offset, tang, bita, uni.outer_r, half_w, 2.0, segs, &mut verts, &mut indices);
         }
 
         if verts.is_empty() { return; }
 
-        // Upload camera uniform.
         queue.write_buffer(
             &self.cam_buf,
             0,
@@ -534,7 +510,6 @@ impl BrushPipeline {
             }),
         );
 
-        // Upload ring geometry (created fresh each frame; the mesh is tiny).
         let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("brush_ring_vbuf"),
             contents: bytemuck::cast_slice(&verts),
@@ -553,50 +528,65 @@ impl BrushPipeline {
         pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
-    /// Draws the screen-space 2-D fallback brush cursor.
-    ///
-    /// Must be called in the **overlay** render pass (no depth attachment).
-    /// Skips drawing if the cursor IS on the model surface (3-D rings are
-    /// preferred in that case).
     pub fn draw_2d<'rpass>(
         &'rpass self,
         pass:  &mut wgpu::RenderPass<'rpass>,
         queue: &wgpu::Queue,
         uni:   &BrushUniform,
     ) {
-        // Only draw when the ray missed the model.
         if uni.hit.is_some() {
             return;
         }
 
-        // Determine the pixel-space scale factor from the view-projection matrix.
-        // We project the model centre (origin) and use it as the scale reference.
-        let reference_pt = Vec4::new(0.0, 0.0, 0.0, 1.0);
-        let p_clip       = uni.view_proj * reference_pt;
-        let w            = p_clip.w.abs().max(0.0001);
-
-        // proj_x is the X scale factor of the projection; combined with the
-        // viewport half-width this gives us pixels per world unit at the origin.
-        let proj_x       = uni.view_proj.col(0).x;
-        let px_per_unit  = (proj_x * uni.viewport[0] * 0.5 / w).abs();
-
-        // Stroke width in pixels (same half-width as the 3-D ribbon, projected).
-        let line_w_px = 0.007_f32 * px_per_unit;
+        const FALLBACK_INNER_PX: f32 = 100.0;
+        const FALLBACK_OUTER_PX: f32 = 120.0;
+        const LINE_WIDTH_PX: f32     = 1.8;
 
         let u = Uni2D {
             cx:     uni.cursor_px[0],
             cy:     uni.cursor_px[1],
-            inner:  uni.inner_r * px_per_unit,
-            outer:  uni.outer_r * px_per_unit,
-            line_w: line_w_px,
+            inner:  FALLBACK_INNER_PX,
+            outer:  FALLBACK_OUTER_PX,
+            line_w: LINE_WIDTH_PX,
             ..Default::default()
         };
         queue.write_buffer(&self.uni2d_buf, 0, bytemuck::bytes_of(&u));
 
-        // Full-screen triangle — the fragment shader discards everything outside
-        // the ring radii.
         pass.set_pipeline(&self.pipeline_2d);
         pass.set_bind_group(0, &self.bg_2d, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+// ── Helper: pixels per world unit at a given point ───────────────────────────
+
+/// Returns how many physical pixels correspond to one world unit at `pos`.
+///
+/// Uses all three world axes and takes the maximum, which avoids the
+/// near-zero result that occurred when the original code used only Vec3::X
+/// and the camera happened to look along X.
+fn screen_pixels_per_world_unit(pos: Vec3, view_proj: Mat4, viewport: [f32; 2]) -> f32 {
+    let p = view_proj.project_point3(pos);
+
+    // X axis contribution (measured in horizontal pixels).
+    let px_x = {
+        let q = view_proj.project_point3(pos + Vec3::X);
+        ((q.x - p.x) * viewport[0] * 0.5).abs()
+    };
+
+    // Y axis contribution (measured in vertical pixels).
+    let px_y = {
+        let q = view_proj.project_point3(pos + Vec3::Y);
+        ((q.y - p.y) * viewport[1] * 0.5).abs()
+    };
+
+    // Z axis contribution (2-D screen distance).
+    let px_z = {
+        let q  = view_proj.project_point3(pos + Vec3::Z);
+        let dx = (q.x - p.x) * viewport[0] * 0.5;
+        let dy = (q.y - p.y) * viewport[1] * 0.5;
+        (dx * dx + dy * dy).sqrt()
+    };
+
+    px_x.max(px_y).max(px_z)
 }
